@@ -1,77 +1,60 @@
 from __future__ import annotations
-
-from datetime import date
-from typing import Optional
-
+from datetime import datetime
 from fastmcp import FastMCP
+from app.config import MAIN_SERVER_PORT
+from app.data.repository import DataRepository
 
-from app.config import OF_SERVER_PORT
-from app.data.repository import InventoryRepository
-
-inventory_repo = InventoryRepository()
+# Initialize Logic
+repo = DataRepository()
 
 mcp = FastMCP(
-    name="Operations Finance Server",
-    instructions="Generate petty cash and purchase request forms with structured payloads.",
+    name="Mango Unified Server",
+    instructions="Centralized server for Reporter, PPN, and OF tools.",
 )
 
+# --- Shared Tools ---
+@mcp.tool(name="today", description="Get current date and time.")
+def today() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def _iso_today() -> str:
-    return date.today().isoformat()
+# --- Reporter Tools ---
+@mcp.tool(name="get_report", description="List all available report names.")
+def get_report() -> list[str]:
+    return repo.get_report_names()
 
+@mcp.tool(name="get_report_columns", description="Get column names for a specific report.")
+def get_report_columns(report_name: str) -> list[str]:
+    return repo.get_report_columns(report_name)
 
-@mcp.tool(name="pretty_cash_fillform", description="Prepare a petty cash form payload")
-def pretty_cash_fillform(
-    amount: float,
-    description: str,
-    request_date: Optional[str] = None,
-) -> dict:
-    payload = {
-        "form": "petty_cash",
-        "request_date": request_date or _iso_today(),
-        "amount": amount,
-        "description": description,
-    }
-    return {"status": "ready", "payload": payload}
+@mcp.tool(name="read_report", description="Read data from a report. Optionally specify columns.")
+def read_report(report_name: str, columns: list[str] | None = None) -> list[dict]:
+    return repo.read_report(report_name, columns)
 
+# --- PPN Tools ---
+@mcp.tool(name="get_plan_columns", description="Get column names for PPN plan data.")
+def get_plan_columns() -> list[str]:
+    return repo.get_plan_columns()
 
-@mcp.tool(name="pr_fillform", description="Prepare a purchase request form")
-def pr_fillform(
-    material_name: str,
-    quantity: float,
-    material_code: Optional[str] = None,
-    request_date: Optional[str] = None,
-    unit: Optional[str] = None,
-) -> dict:
-    resolved_code = material_code
-    resolved_unit = unit
+@mcp.tool(name="get_plan", description="Search for project plan details by keyword.")
+def get_plan(query: str) -> list[dict]:
+    return repo.get_plan(query)
 
-    if not resolved_code or not resolved_unit:
-        match = inventory_repo.get_material_by_keyword(material_name)
-        if match:
-            resolved_code = resolved_code or match["itemcode"]
-            resolved_unit = resolved_unit or match.get("unitname")
+@mcp.tool(name="get_material_use", description="Get summary of material usage.")
+def get_material_use() -> list[dict]:
+    return repo.get_material_use()
 
-    payload = {
-        "form": "purchase_request",
-        "request_date": request_date or _iso_today(),
-        "material_name": material_name,
-        "material_code": resolved_code,
-        "quantity": quantity,
-        "unit": resolved_unit,
-    }
+# --- OF Tools ---
+@mcp.tool(name="phase_structure", description="Parse expense text into JSON structure.")
+def phase_structure(text: str) -> dict:
+    return repo.phase_structure(text)
 
-    return {
-        "status": "ready" if resolved_code else "missing_material_code",
-        "payload": payload,
-        "resolution_hint": None if resolved_code else "Call get_material in IC server to confirm the code.",
-    }
-
+@mcp.tool(name="get_expense_code", description="Find expense code from description.")
+def get_expense_code(description: str) -> list[dict]:
+    return repo.get_expense_code(description)
 
 def run() -> None:
-    mcp.run(transport="http", host="127.0.0.1", port=OF_SERVER_PORT)
-
+    print(f"Starting Unified MCP Server on port {MAIN_SERVER_PORT}...")
+    mcp.run(transport="http", host="127.0.0.1", port=MAIN_SERVER_PORT)
 
 if __name__ == "__main__":
     run()
-

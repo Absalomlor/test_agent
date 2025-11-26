@@ -1,141 +1,202 @@
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
+import json
+import os
+import re
 from typing import Any, Dict, List, Optional
+import boto3
+import pandas as pd
 
-from app.config import DB_PATH
-from app.data.mock_db import ensure_db
+from app.config import (
+    AGING_REPORT_PATH,
+    ACTUAL_COST_PATH,
+    EXPENSE_CODE_PATH,
+    PPN_DATA_PATH
+)
 
-class BaseRepository:
-    def __init__(self, db_path: Path = DB_PATH) -> None:
-        ensure_db()
-        self.db_path = db_path
+class DataRepository:
+    def __init__(self) -> None:
+        # --- Load DataFrames ---
+        self.aging_df = self._load_csv(AGING_REPORT_PATH)
+        if "diff_day" in self.aging_df.columns:
+            self.aging_df["diff_day"] = pd.to_numeric(self.aging_df["diff_day"], errors="coerce").fillna(0)
+            self.aging_df = self.aging_df.sort_values(by="diff_day", ascending=False)
 
-    def _query(self, sql: str, params: tuple[Any, ...]) -> List[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+        self.cost_df = self._load_csv(ACTUAL_COST_PATH, skiprows=3) 
+        self.expense_df = self._load_csv(EXPENSE_CODE_PATH)
+        self.ppn_df = self._load_csv(PPN_DATA_PATH)
+        if "required_qty" in self.ppn_df.columns:
+             self.ppn_df["required_qty"] = pd.to_numeric(self.ppn_df["required_qty"], errors='coerce').fillna(0)
 
-
-class InventoryRepository(BaseRepository):
-    def search_materials(
-        self,
-        project_id: Optional[str] = None,
-        text_query: Optional[str] = None,
-        itemcode: Optional[str] = None,
-        whcode: Optional[str] = None,
-        limit: int = 25,
-    ) -> List[Dict[str, Any]]:
-        clauses = []
-        params: list[Any] = []
-
-        if project_id:
-            clauses.append("pre_event = ?")
-            params.append(project_id)
-        if itemcode:
-            clauses.append("itemcode = ?")
-            params.append(itemcode)
-        if whcode:
-            clauses.append("whcode = ?")
-            params.append(whcode)
-        if text_query:
-            like = f"%{text_query.lower()}%"
-            clauses.append("(lower(c_des1) LIKE ? OR lower(c_des2) LIKE ? OR lower(itemcode) LIKE ?)")
-            params.extend([like, like, like])
-
-        where_sql = " AND ".join(clauses) if clauses else "1=1"
-        sql = f"SELECT * FROM ic_inventory WHERE {where_sql} ORDER BY qtybal DESC LIMIT ?"
-        params.append(limit)
-        return self._query(sql, tuple(params))
-
-    def low_stock(
-        self,
-        threshold: float,
-        project_id: Optional[str] = None,
-        whcode: Optional[str] = None,
-        limit: int = 50,
-    ) -> List[Dict[str, Any]]:
-        clauses = ["qtybal <= ?"]
-        params: list[Any] = [threshold]
-
-        if project_id:
-            clauses.append("pre_event = ?")
-            params.append(project_id)
-        if whcode:
-            clauses.append("whcode = ?")
-            params.append(whcode)
-
-        sql = (
-            "SELECT * FROM ic_inventory WHERE " + " AND ".join(clauses) + " ORDER BY qtybal ASC LIMIT ?"
+        # Initialize Bedrock Client
+        # ใช้ Region จาก Env หรือ Default เป็น us-east-1
+        self.bedrock = boto3.client(
+            'bedrock-runtime', 
+            region_name=os.getenv("BEDROCK_REGION", "us-east-1") 
         )
-        params.append(limit)
-        return self._query(sql, tuple(params))
 
-    def get_material_by_keyword(self, keyword: str) -> Optional[Dict[str, Any]]:
-        rows = self.search_materials(text_query=keyword, limit=1)
-        return rows[0] if rows else None
+        # --- Pre-calculate Expense String ---
+        # เตรียมข้อมูลสำหรับ Prompt ไว้เลย จะได้ไม่ต้องวนลูปสร้างใหม่ทุกครั้งที่เรียก
+        if "expens_code" in self.expense_df.columns and "expens_name" in self.expense_df.columns:
+            self.expense_master_list_str = "\n".join(
+                self.expense_df.apply(
+                    lambda x: f"{x['expens_code']} - {x['expens_name']}", axis=1
+                ).tolist()
+            )
+        else:
+            self.expense_master_list_str = "No expense data available."
 
+    def _load_csv(self, path, **kwargs) -> pd.DataFrame:
+        try:
+            return pd.read_csv(path, dtype=str, **kwargs).fillna("")
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            return pd.DataFrame()
 
-class PlanRepository(BaseRepository):
-    def get_plan(
-        self,
-        project_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        cost_code: Optional[str] = None,
-        limit: int = 50,
-    ) -> List[Dict[str, Any]]:
-        clauses = []
-        params: list[Any] = []
+    # ... (ฟังก์ชัน Reporter และ PPN คงเดิม) ...
+    def _normalize_report_name(self, name: str) -> str:
+        if not name: return ""
+        name_lower = name.lower()
+        if "aging" in name_lower or "stock" in name_lower or "material" in name_lower:
+            return "aging_stock_balance"
+        if "cost" in name_lower or "actual" in name_lower or "budget" in name_lower:
+            return "actual_cost"
+        return name
 
-        if project_id:
-            clauses.append("pre_event = ?")
-            params.append(project_id)
-        if task_id:
-            clauses.append("task_id = ?")
-            params.append(task_id)
-        if cost_code:
-            clauses.append("cost_code = ?")
-            params.append(cost_code)
+    def get_report_names(self) -> List[str]:
+        return ["aging_stock_balance", "actual_cost"]
 
-        where_sql = " AND ".join(clauses) if clauses else "1=1"
-        sql = f"SELECT * FROM ppn_plans WHERE {where_sql} ORDER BY start_date LIMIT ?"
-        params.append(limit)
-        return self._query(sql, tuple(params))
+    def get_report_columns(self, report_name: str) -> List[str]:
+        std_name = self._normalize_report_name(report_name)
+        if std_name == "aging_stock_balance": return list(self.aging_df.columns)
+        elif std_name == "actual_cost": return list(self.cost_df.columns)
+        return []
 
-    def get_material_usage(
-        self,
-        project_id: str,
-        task_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        clauses = ["pre_event = ?"]
-        params: list[Any] = [project_id]
+    def read_report(self, report_name: str, columns: Optional[List[str] | str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+        std_name = self._normalize_report_name(report_name)
+        
+        # 1. เลือก DataFrame
+        df = self.aging_df if std_name == "aging_stock_balance" else self.cost_df
+        
+        # --- [NEW] Defensive Logic: แก้ปัญหา Agent ส่ง String มาแทน List ---
+        if columns:
+            if isinstance(columns, str):
+                try:
+                    # พยายามแปลง String "[...]" ให้เป็น List จริงๆ
+                    columns = json.loads(columns)
+                except:
+                    # ถ้าแปลงไม่ได้ (เช่นส่งมาแบบ a,b,c) ให้ลอง split เอา
+                    columns = [c.strip() for c in columns.split(',')]
+            
+            # ตอนนี้ columns เป็น List แน่นอนแล้ว
+            if len(columns) > 0:
+                selected_cols = []
+                available_cols_map = {c.lower().strip(): c for c in df.columns}
+                
+                for req_col in columns:
+                    # กันเหนียว: ถ้าใน list ยังมี object ประหลาดที่ไม่ใช่ string
+                    if not isinstance(req_col, str): continue
+                        
+                    req_clean = req_col.lower().strip()
+                    
+                    # Exact Match
+                    if req_clean in available_cols_map:
+                        selected_cols.append(available_cols_map[req_clean])
+                    else:
+                        # Partial Match
+                        matches = [real for clean, real in available_cols_map.items() if req_clean in clean]
+                        if matches:
+                            selected_cols.append(matches[0])
+                
+                if selected_cols:
+                    selected_cols = list(set(selected_cols))
+                    df = df[selected_cols]
+                else:
+                    return [{"error": f"Columns not found. Available columns are: {list(df.columns)}"}]
+        
+        # 2. ส่งกลับข้อมูล
+        return df.head(limit).where(pd.notnull(df), None).to_dict("records")
 
-        if task_id:
-            clauses.append("task_id = ?")
-            params.append(task_id)
+    def get_plan_columns(self) -> List[str]:
+        return list(self.ppn_df.columns)
 
-        where_sql = " AND ".join(clauses)
-        detail_sql = f"SELECT * FROM ppn_plans WHERE {where_sql} ORDER BY task_id"
-        detail = self._query(detail_sql, tuple(params))
+    def get_plan(self, query: str) -> List[Dict[str, Any]]:
+        df = self.ppn_df
+        mask = df.apply(lambda x: x.astype(str).str.contains(query, case=False, na=False)).any(axis=1)
+        return df[mask].head(20).to_dict("records")
 
-        total_qty = sum(row["required_qty"] for row in detail)
-        material_breakdown: Dict[str, float] = {}
-        for row in detail:
-            material_breakdown[row["itemcode"]] = material_breakdown.get(row["itemcode"], 0) + row["required_qty"]
+    def get_material_use(self) -> List[Dict[str, Any]]:
+        if "c_des1" in self.ppn_df.columns and "required_qty" in self.ppn_df.columns:
+            grouped = self.ppn_df.groupby("c_des1")["required_qty"].sum().reset_index()
+            grouped = grouped.sort_values(by="required_qty", ascending=False)
+            return grouped.head(50).to_dict("records")
+        return self.ppn_df.head(20).to_dict("records")
 
+    # --- OF Agent Tools (อัปเกรดใหม่ด้วย LLM) ---
+    def phase_structure(self, text: str) -> Dict[str, Any]:
+        amount_match = re.search(r'[\d,]+(\.\d{2})?', text)
+        amount = 0.0
+        if amount_match:
+            try:
+                clean_num = amount_match.group().replace(",", "")
+                amount = float(clean_num)
+            except: pass
+        
         return {
-            "project_id": project_id,
-            "task_id": task_id,
-            "total_required_qty": total_qty,
-            "materials": material_breakdown,
-            "detail": detail,
+            "date": None,
+            "amount": amount,
+            "description": text.strip(),
+            "expense_code": "Call tool 'get_expense_code' with the description to get the AI-selected code."
         }
 
+    def get_expense_code(self, description: str) -> List[Dict[str, str]]:
+        """
+        ใช้ LLM (Claude 3.7) หา expense code โดยตรงจากความหมาย
+        """
+        try:
+            prompt = f"""
+            คุณเป็นผู้เชี่ยวชาญด้านการจัดหมวดหมู่ค่าใช้จ่าย
 
-def get_repositories() -> tuple[InventoryRepository, PlanRepository]:
-    inventory = InventoryRepository()
-    plan = PlanRepository()
-    return inventory, plan
+            รายการค่าใช้จ่ายที่มี:
+            {self.expense_master_list_str}
 
+            คำอธิบาย: "{description}"
+
+            ให้เลือกรหัสค่าใช้จ่ายที่เหมาะสมที่สุด โดยพิจารณาจากความหมายและบริบท
+
+            ตัวอย่าง:
+            - "รถไฟฟ้า" = ค่าเดินทาง (ไม่ใช่ค่าไฟฟ้า)
+            - "กิน" = ค่าอาหาร
+            - "ไฟฟ้า" = ค่าสาธารณูปโภค
+
+            ตอบเฉพาะรหัส 5 ตัวเท่านั้นไม่ต้องอธิบายเพิ่มเติม เช่น F0036 หรือ G0144:
+        """
+            # เรียก Bedrock API
+            response = self.bedrock.invoke_model(
+                modelId='us.anthropic.claude-3-7-sonnet-20250219-v1:0',
+                body=json.dumps({
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 50,
+                    "temperature": 0.0,
+                    "anthropic_version": "bedrock-2023-05-31"
+                })
+            )
+            
+            # แกะ Response
+            response_body = json.loads(response['body'].read())
+            ai_code = response_body['content'][0]['text'].strip()
+            
+            # ค้นหาข้อมูลเต็มจากรหัสที่ AI เลือกมา
+            matched_row = self.expense_df[self.expense_df['expens_code'] == ai_code]
+            
+            if not matched_row.empty:
+                return matched_row[['expens_code', 'expens_name']].to_dict('records')
+            else:
+                # กรณี AI ตอบมาแต่รหัสหาไม่เจอใน CSV (Rare case)
+                return [{"expens_code": ai_code, "expens_name": "AI Selected Code (Not in CSV List)"}]
+
+        except Exception as e:
+            print(f"Error calling Bedrock LLM: {e}")
+            # Fallback ไปใช้วิธีเดิม (Keyword Search) ถ้า LLM มีปัญหา
+            mask = self.expense_df["expens_name"].astype(str).str.contains(description, case=False, na=False)
+            return self.expense_df[mask][["expens_code", "expens_name"]].head(5).to_dict("records")
