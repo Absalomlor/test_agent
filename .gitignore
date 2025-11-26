@@ -1,0 +1,34 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets / env
+.env
+
+# Local data / DB / logs
+mock_data.sqlite
+*.db
+*.log
+*.csv.zip
+*.export.csv
+
+# Streamlit / cache
+.streamlit/
+.cache/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+
+strand_guild1.txt
+fastmcp.txt
+agent_prompt.txt
+How to prompt Code Llama
+2025-11-19T07-21_export.csv
+
+ic_data.csv
+ppn_data.csv

@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 from app.config import DB_PATH
 from app.data.mock_db import ensure_db
 
-
 class BaseRepository:
     def __init__(self, db_path: Path = DB_PATH) -> None:
         ensure_db()
