@@ -58,7 +58,6 @@ AGENT_SETTINGS: Dict[str, AgentSettings] = {
             2. **Inspect Structure**: Call 'get_report_columns' for that report to understand available fields.
                (DO NOT guess column names. Always check first.)
             3. **Fetch Data**: Call 'read_report'.
-               - IMPORTANT: You MUST provide the 'columns' list using the EXACT NAMES returned from 'get_report_columns'. Do not invent column names.
                - If the user asks for specific fields, pass them in the 'columns' argument.
                - If general, fetch default columns.
             4. **Analyze**: Summarize the returned data in Thai. Highlight key figures like Total Quantity or High Cost items.

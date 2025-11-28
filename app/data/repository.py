@@ -72,50 +72,13 @@ class DataRepository:
         elif std_name == "actual_cost": return list(self.cost_df.columns)
         return []
 
-    def read_report(self, report_name: str, columns: Optional[List[str] | str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    def read_report(self, report_name: str, columns: Optional[List[str]] = None, limit: int = 20) -> List[Dict[str, Any]]:
         std_name = self._normalize_report_name(report_name)
-        
-        # 1. เลือก DataFrame
         df = self.aging_df if std_name == "aging_stock_balance" else self.cost_df
-        
-        # --- [NEW] Defensive Logic: แก้ปัญหา Agent ส่ง String มาแทน List ---
         if columns:
-            if isinstance(columns, str):
-                try:
-                    # พยายามแปลง String "[...]" ให้เป็น List จริงๆ
-                    columns = json.loads(columns)
-                except:
-                    # ถ้าแปลงไม่ได้ (เช่นส่งมาแบบ a,b,c) ให้ลอง split เอา
-                    columns = [c.strip() for c in columns.split(',')]
-            
-            # ตอนนี้ columns เป็น List แน่นอนแล้ว
-            if len(columns) > 0:
-                selected_cols = []
-                available_cols_map = {c.lower().strip(): c for c in df.columns}
-                
-                for req_col in columns:
-                    # กันเหนียว: ถ้าใน list ยังมี object ประหลาดที่ไม่ใช่ string
-                    if not isinstance(req_col, str): continue
-                        
-                    req_clean = req_col.lower().strip()
-                    
-                    # Exact Match
-                    if req_clean in available_cols_map:
-                        selected_cols.append(available_cols_map[req_clean])
-                    else:
-                        # Partial Match
-                        matches = [real for clean, real in available_cols_map.items() if req_clean in clean]
-                        if matches:
-                            selected_cols.append(matches[0])
-                
-                if selected_cols:
-                    selected_cols = list(set(selected_cols))
-                    df = df[selected_cols]
-                else:
-                    return [{"error": f"Columns not found. Available columns are: {list(df.columns)}"}]
-        
-        # 2. ส่งกลับข้อมูล
-        return df.head(limit).where(pd.notnull(df), None).to_dict("records")
+            valid_cols = [c for c in columns if c in df.columns]
+            if valid_cols: df = df[valid_cols]
+        return df.head(limit).to_dict("records")
 
     def get_plan_columns(self) -> List[str]:
         return list(self.ppn_df.columns)
